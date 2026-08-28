@@ -87,6 +87,19 @@ class SqliteContextEngine(
     }
 
     /**
+     * Closes the underlying [android.database.sqlite.SQLiteOpenHelper]'s
+     * connection — [store] extends it and inherits `close()`, but nothing
+     * called it before this override existed, which is exactly why
+     * `SQLiteConnectionPool` logged a leaked-connection warning whenever a
+     * host stopped its runtime without recreating the process. Safe to call
+     * more than once; [android.database.sqlite.SQLiteOpenHelper.close] is
+     * idempotent.
+     */
+    override fun close() {
+        store.close()
+    }
+
+    /**
      * SQLite already persists across process death — this only needs to
      * carry the small amount of state that lives outside it (the system
      * prompt and the retrieval-query cursor), so a restored engine picks up

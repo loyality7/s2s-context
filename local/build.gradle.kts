@@ -45,7 +45,7 @@ kotlin {
 
 dependencies {
     api(project(":common"))
-    api("com.github.loyality7:speech-to-speech-mobile:1.0.4")
+    api("com.github.loyality7:speech-to-speech-mobile:1.0.7")
 
     // No third-party dependency: android.database.sqlite (with FTS5, built
     // into the platform since API 11) is all this backend needs.

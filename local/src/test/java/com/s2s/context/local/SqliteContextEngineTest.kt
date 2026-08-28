@@ -310,4 +310,33 @@ class SqliteContextEngineTest {
             assertNotEquals("assistant", turns.firstOrNull()?.role ?: "user")
         }
     }
+
+    // --- Lifecycle (close) ---
+
+    @Test
+    fun `close does not throw and can be called more than once`() {
+        val ctx = engine(sessionId = "close-1")
+        ctx.addUser("hello")
+
+        ctx.close()
+        ctx.close() // SQLiteOpenHelper.close() is idempotent — must not throw a second time
+    }
+
+    @Test
+    fun `a new engine instance for the same session works after a previous instance was closed`() {
+        val first = engine(sessionId = "close-2")
+        first.addUser("before close")
+        first.close()
+
+        // Simulates JarvisRuntime.stop() followed by start() — a fresh
+        // SqliteContextEngine instance must still see the persisted
+        // transcript and accept new turns, proving close() only released the
+        // connection, not the underlying database file.
+        val second = engine(sessionId = "close-2")
+        second.addAssistant("after reopen")
+
+        val messages = second.messages()
+        assertTrue(messages.any { it.content == "before close" })
+        assertTrue(messages.any { it.content == "after reopen" })
+    }
 }
