@@ -114,8 +114,23 @@ internal class WorkingContextBuilder(
  * these numbers costs more tokens per turn, never loses data.
  */
 data class WorkingContextConfig(
-    /** Verbatim recent turns kept in every prompt, oldest to newest. */
-    val recentEventLimit: Int = 12,
+    /**
+     * Verbatim recent turns kept in every prompt, oldest to newest.
+     *
+     * Six, not twelve. Measured on a real phone: a ~2100-character prompt
+     * took 15s to first token on a 0.5B local model, against ~580ms for a
+     * ~70-character one — and prompt length is the variable the host
+     * actually controls. Twelve turns of verbatim history is the largest
+     * contributor to that length, and it also keeps shifting the prompt's
+     * prefix as the window slides, which defeats KV-cache reuse and makes
+     * every turn pay a full prefill instead of an incremental one.
+     *
+     * What this costs: the model sees less literal recent dialogue. What
+     * offsets it: older turns are still retrievable ([relevantHistoryLimit])
+     * and durable facts still surface through memory — bounding the prompt
+     * is not the same as bounding what the system remembers.
+     */
+    val recentEventLimit: Int = 6,
     /** Retrieved older events injected as a compact summary line, not verbatim. */
     val relevantHistoryLimit: Int = 3,
     /** Retrieved durable memories injected per turn. */
