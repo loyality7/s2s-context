@@ -49,10 +49,24 @@ internal class TranscriptStore(context: Context, dbName: String = "s2s_context.d
         db.execSQL("CREATE INDEX idx_events_session ON events(session_id, event_id)")
         createFtsObjects(db)
         SqliteMemoryRepository.createSchema(db)
+        SqliteIdentityStore.createSchema(db)
     }
 
+    /**
+     * v1 → v2: memory gained provenance/importance/confidence/kind/scope
+     * metadata, and identity/profile storage was added.
+     *
+     * Migrations are additive and idempotent — columns are added if absent,
+     * tables created IF NOT EXISTS, and existing rows translated in place.
+     * Nothing is dropped and no data is rewritten destructively: a user's
+     * existing conversations and memories are the thing least acceptable to
+     * lose to a schema change.
+     */
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // No prior version to migrate from yet.
+        if (oldVersion < 2) {
+            SqliteMemoryRepository.migrateToV2(db)
+            SqliteIdentityStore.createSchema(db)
+        }
     }
 
     /**
@@ -254,7 +268,7 @@ internal class TranscriptStore(context: Context, dbName: String = "s2s_context.d
     )
 
     companion object {
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
 
         /**
          * FTS5 MATCH syntax treats `" ' ( ) * -` etc as query operators — a

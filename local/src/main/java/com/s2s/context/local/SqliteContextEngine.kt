@@ -26,7 +26,8 @@ class SqliteContextEngine(
     private val store = TranscriptStore(context.applicationContext)
     private val retrieval: Retrieval = SqliteRetrieval(store)
     private val memory: MemoryRepository = SqliteMemoryRepository(store)
-    private val builder = WorkingContextBuilder(store, retrieval, memory, workingContextConfig)
+    private val identity: IdentityStore = SqliteIdentityStore(store)
+    private val builder = WorkingContextBuilder(store, retrieval, memory, workingContextConfig, identity)
 
     @Volatile
     private var system: String = systemPrompt
@@ -37,6 +38,26 @@ class SqliteContextEngine(
 
     /** Durable memory CRUD — not part of [ContextEngine], since core has no opinion on memory management, only on what a turn's prompt looks like. */
     val memories: MemoryRepository get() = memory
+
+    /**
+     * Agent identity and user profile, persisted in this same database.
+     *
+     * Exposed here (not through [ContextEngine]) for the same reason
+     * [memories] is: the generic contract cares only about what a turn's
+     * prompt looks like. A host settings screen uses this; the agent
+     * harness never touches it.
+     */
+    val identities: IdentityStore get() = identity
+
+    /**
+     * The gate every conversation-derived memory should go through.
+     *
+     * Exposed rather than applied automatically because *when* to consider
+     * a memory is the host's decision — doing it inline on every turn would
+     * put write work on the voice path, which §12's background-consolidation
+     * requirement exists to avoid.
+     */
+    val memoryWriter: MemoryWriter by lazy { MemoryWriter(memory) }
 
     override fun addUser(text: String) {
         store.append(sessionId, ConversationEventType.USER_MESSAGE, text, System.currentTimeMillis())

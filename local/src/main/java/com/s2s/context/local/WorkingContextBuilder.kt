@@ -20,6 +20,7 @@ internal class WorkingContextBuilder(
     private val retrieval: Retrieval,
     private val memory: MemoryRepository,
     private val config: WorkingContextConfig,
+    private val identityStore: IdentityStore? = null,
 ) {
     /**
      * Builds the message list for [sessionId]. [currentUserText] — the most
@@ -42,19 +43,37 @@ internal class WorkingContextBuilder(
         val relevantMemory = if (currentUserText.isNullOrBlank()) {
             emptyList()
         } else {
-            memory.relevant(sessionId, currentUserText, config.relevantMemoryLimit)
+            memory.relevant(
+                sessionId = sessionId,
+                query = currentUserText,
+                limit = config.relevantMemoryLimit,
+                kinds = config.retrievedMemoryKinds,
+                projectIds = config.activeProjectIds,
+            )
         }
 
-        return buildList {
-            add(ChatMessage("system", listOfNotNull(systemPrompt, extraSystem).joinToString("\n\n")))
+        // Identity and profile are configuration the user chose, so they
+        // belong in the system message with the host's own prompt — unlike
+        // retrieved memory, which is data and gets quoted separately below.
+        val identityFragment = identityStore?.loadIdentity()?.systemPromptFragment()
+        val profileFragment = identityStore?.loadProfile()?.systemPromptFragment()
 
-            if (relevantMemory.isNotEmpty()) {
-                add(
-                    ChatMessage(
-                        "system",
-                        "Remembered from prior context: " + relevantMemory.joinToString(" ") { it.content },
-                    ),
-                )
+        return buildList {
+            add(
+                ChatMessage(
+                    "system",
+                    listOfNotNull(identityFragment, systemPrompt, profileFragment, extraSystem)
+                        .filter { it.isNotBlank() }
+                        .joinToString("\n\n"),
+                ),
+            )
+
+            // Rendered by MemoryInjection, not concatenated here: retrieved
+            // memory is quoted, attributed and budget-capped so a stored
+            // sentence cannot read as an instruction the assistant was
+            // given. See MemoryInjection's doc for why that matters.
+            MemoryInjection.render(relevantMemory, config.memoryInjectionBudget)?.let {
+                add(ChatMessage("system", it))
             }
 
             if (relevantHistory.isNotEmpty()) {
@@ -103,4 +122,21 @@ data class WorkingContextConfig(
     val relevantMemoryLimit: Int = 3,
     /** Characters of a retrieved event's content shown in the summary line. */
     val retrievedSnippetChars: Int = 160,
+    /**
+     * Which memory kinds ordinary retrieval considers.
+     *
+     * Durable only by default: episodic memory answers "what happened",
+     * which is rarely what a question needs and would otherwise compete
+     * with beliefs for the same few prompt slots. A host that wants
+     * history-aware recall opts in by adding [MemoryKind.EPISODIC].
+     */
+    val retrievedMemoryKinds: Set<MemoryKind> = setOf(MemoryKind.DURABLE),
+    /**
+     * Projects whose [MemoryScope.Project] memories are currently visible.
+     * Empty means none — a project fact never leaks into an unrelated
+     * conversation just because it matched the words.
+     */
+    val activeProjectIds: Set<String> = emptySet(),
+    /** Hard ceiling on what memory may add to one prompt. See [MemoryInjectionBudget]. */
+    val memoryInjectionBudget: MemoryInjectionBudget = MemoryInjectionBudget(),
 )

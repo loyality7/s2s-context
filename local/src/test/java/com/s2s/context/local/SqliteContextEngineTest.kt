@@ -328,7 +328,7 @@ class SqliteContextEngineTest {
         first.addUser("before close")
         first.close()
 
-        // Simulates JarvisRuntime.stop() followed by start() — a fresh
+        // Simulates a host runtime stop() followed by start() — a fresh
         // SqliteContextEngine instance must still see the persisted
         // transcript and accept new turns, proving close() only released the
         // connection, not the underlying database file.
