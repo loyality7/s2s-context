@@ -13,7 +13,20 @@ data class MemoryCandidate(
     val scope: MemoryScope,
     val provenance: MemoryProvenance,
     val kind: MemoryKind = MemoryKind.DURABLE,
-    /** Null means "let the writer judge from the text". An explicit value wins. */
+    /**
+     * Whether whoever produced this candidate already decided it is worth
+     * keeping, rather than [consider] having to guess from the text.
+     *
+     * The intended caller is a `remember` tool call: the model's own
+     * generation already chose to invoke it, which IS the judgment call —
+     * asking [consider] to re-derive "did the user mean this?" from a phrase
+     * list on top of that would be redundant at best. A caller that instead
+     * hands every raw utterance to [consider] unconditionally must leave
+     * this false; [consider] applies no independent judgment of its own
+     * (see this class's doc for why guessing from substrings was removed).
+     */
+    val explicit: Boolean = false,
+    /** Null means "let the writer judge from [explicit]". An explicit value wins outright. */
     val importance: Float? = null,
     val confidence: Float = 1.0f,
     val tags: List<String> = emptyList(),
@@ -29,30 +42,39 @@ sealed interface MemoryDecision {
 }
 
 /**
- * The gate between conversation and durable memory.
+ * The gate between a memory request and durable storage.
  *
- * Deliberately conservative. A personal agent that remembers everything is
- * not more helpful — it is a system whose recall is dominated by noise, and
- * whose prompt fills with things the user never asked it to keep. So the
- * default answer is [MemoryDecision.Ignored], and something has to earn a
- * write:
+ * Deliberately conservative, but the judgment of "is this worth keeping" is
+ * NOT this class's job — it used to guess from a hardcoded phrase list
+ * (`EXPLICIT_CUES`: "remember that", "I prefer", "always", …), and a real
+ * device caught exactly why that fails: the sentence "Hello cookies,
+ * remember this" was stored verbatim, because it happened to contain the
+ * substring "remember this" — the list matched syntax, not intent. A phrase
+ * list cannot tell "remember that I like concise answers" (a real
+ * preference) from "remember this" said about nothing in particular.
  *
- * - an **explicit** instruction ("remember that…", "I prefer…", "always…"),
- * - or a caller stating importance itself, which is how a tool/plugin with
- *   real knowledge (a calendar sync, say) records a fact without pretending
- *   the user said it.
+ * The real judgment now belongs to whoever calls [consider]: normally a
+ * `remember` tool the model itself chooses to invoke (see `s2s-tools`'
+ * `MemoryTools`) — the model's own generation, already reasoning about the
+ * conversation, decides intent for free, with no second LLM call and no
+ * heuristic standing in for understanding. [MemoryCandidate.explicit] just
+ * carries that decision through; this class enforces the boundaries around
+ * it (dedup, provenance, scope) that no amount of caller good faith should
+ * bypass:
  *
- * Provenance is enforced here, not in ranking: text from a tool or the web
- * may be *stored*, but never at [MemoryScope.User] and never at full
- * confidence. Ranking is a preference; this is a boundary. Without it, a
- * web page that says "the user prefers X" eventually becomes something the
- * assistant believes about its user.
+ * - Provenance is enforced here, not in ranking: text from a tool or the web
+ *   may be *stored*, but never at [MemoryScope.User] and never at full
+ *   confidence. Ranking is a preference; this is a boundary. Without it, a
+ *   web page that says "the user prefers X" eventually becomes something the
+ *   assistant believes about its user.
+ * - A DURABLE memory still needs [MemoryCandidate.explicit], an explicit
+ *   [MemoryCandidate.importance], or [MemoryProvenance.SYSTEM] — an ordinary
+ *   caller that runs every utterance through [consider] unconditionally and
+ *   never sets `explicit` stores nothing, by construction, not by luck.
+ * - Duplicate detection and confidence capping run exactly as before.
  *
  * No LLM call. Runs on the write path, which may be on a background thread
- * but still shares a device with a voice turn — and an extraction model
- * here would be a second permanent model in the hot path. A model-assisted
- * extractor can be layered on top later by feeding it as another producer
- * of [MemoryCandidate]s.
+ * but still shares a device with a voice turn.
  */
 class MemoryWriter(
     private val repository: MemoryRepository,
@@ -76,28 +98,21 @@ class MemoryWriter(
             )
         }
 
-        val explicit = isExplicitRequest(content)
         val importance = candidate.importance
-            ?: if (explicit) IMPORTANCE_EXPLICIT else IMPORTANCE_INCIDENTAL
+            ?: if (candidate.explicit) IMPORTANCE_EXPLICIT else IMPORTANCE_INCIDENTAL
 
         // The gate: an episodic record is a factual log and may be written
-        // by its producer, but a DURABLE belief needs either an explicit
-        // user instruction or a caller willing to state importance.
+        // by its producer, but a DURABLE belief needs either the caller
+        // marking it explicit or stating importance itself.
         if (candidate.kind == MemoryKind.DURABLE &&
-            !explicit &&
+            !candidate.explicit &&
             candidate.importance == null &&
             candidate.provenance != MemoryProvenance.SYSTEM
         ) {
-            return MemoryDecision.Ignored("ordinary conversation is not stored as durable memory unless asked")
+            return MemoryDecision.Ignored("not marked explicit and no importance given — ordinary conversation is not stored as durable memory")
         }
 
-        // Dedup against what would actually be STORED, not against what the
-        // user typed: "Remember that I prefer X" is stored as "I prefer X",
-        // so comparing the raw phrasing would never match the existing row
-        // and every repeat would create a new memory.
-        val storable = stripLeadingRequest(content)
-
-        repository.findDuplicate(candidate.scope, storable)?.let { existing ->
+        repository.findDuplicate(candidate.scope, content)?.let { existing ->
             // Seeing the same thing again is evidence it matters, so the
             // existing row is refreshed — but a repeat must not multiply
             // rows, or a user who says "I prefer Kotlin" three times ends
@@ -117,7 +132,7 @@ class MemoryWriter(
         return MemoryDecision.Stored(
             repository.create(
                 scope = candidate.scope,
-                content = storable,
+                content = content,
                 kind = candidate.kind,
                 provenance = candidate.provenance,
                 importance = importance,
@@ -127,55 +142,11 @@ class MemoryWriter(
         )
     }
 
-    /**
-     * Whether the user is asking for something to be remembered, rather
-     * than just talking.
-     *
-     * Phrase matching, not a model: it is cheap, it is inspectable, and its
-     * failure mode is the safe one — a missed cue means a memory is not
-     * written, which the user can correct by saying it plainly. The
-     * opposite failure (inventing memories from ordinary chat) is the one
-     * that quietly ruins a personal agent.
-     */
-    private fun isExplicitRequest(content: String): Boolean {
-        val lower = content.lowercase()
-        return EXPLICIT_CUES.any { lower.startsWith(it) || lower.contains(" $it") }
-    }
-
-    /** Drops the "remember that" preamble so the stored memory reads as the fact itself, not as the request to store it. */
-    private fun stripLeadingRequest(content: String): String {
-        val lower = content.lowercase()
-        for (prefix in STRIPPABLE_PREFIXES) {
-            if (lower.startsWith(prefix)) {
-                return content.substring(prefix.length).trimStart().replaceFirstChar { it.uppercase() }
-            }
-        }
-        return content
-    }
-
     private companion object {
         const val MIN_CONTENT_CHARS = 8
         const val MAX_CONTENT_CHARS = 500
 
         const val IMPORTANCE_EXPLICIT = 0.9f
         const val IMPORTANCE_INCIDENTAL = 0.4f
-
-        val EXPLICIT_CUES = listOf(
-            "remember that", "remember this", "remember:", "remember ",
-            "don't forget", "do not forget",
-            "i prefer", "i'd prefer", "i would prefer",
-            "i always", "i never",
-            "always ", "never ",
-            "from now on", "in future", "in the future",
-            "my name is", "call me",
-            "note that", "keep in mind",
-        )
-
-        val STRIPPABLE_PREFIXES = listOf(
-            "remember that ", "remember this: ", "remember: ", "remember ",
-            "please remember that ", "please remember ",
-            "note that ", "keep in mind that ",
-            "don't forget that ", "do not forget that ",
-        )
     }
 }

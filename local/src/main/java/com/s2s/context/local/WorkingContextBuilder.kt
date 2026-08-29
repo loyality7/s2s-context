@@ -32,7 +32,17 @@ internal class WorkingContextBuilder(
         val recentEvents = transcript.recent(sessionId, config.recentEventLimit)
         val recentIds = recentEvents.map { it.eventId }.toSet()
 
-        val relevantHistory = if (currentUserText.isNullOrBlank()) {
+        // Deep search is OFF by default (both limits default to 0) — this
+        // used to run FTS + memory ranking on every single turn, including
+        // "what time is it" and "calculate 25 times 10", and the resulting
+        // system message changed size turn to turn (measured on a real
+        // device: 303 -> 545 -> 825 chars across three consecutive turns),
+        // which defeats KV-cache prefix reuse the same way an unbounded tool
+        // catalogue did before skills existed. Deep recall over transcript
+        // and memory is now the `recall` tool's job (see MemoryTools in
+        // s2s-tools) — the model asks for it explicitly when a question
+        // actually needs old context, instead of every prompt paying for it.
+        val relevantHistory = if (currentUserText.isNullOrBlank() || config.relevantHistoryLimit <= 0) {
             emptyList()
         } else {
             retrieval.search(sessionId, currentUserText, config.relevantHistoryLimit)
@@ -40,7 +50,7 @@ internal class WorkingContextBuilder(
                 .filterNot { it.eventId in recentIds }
         }
 
-        val relevantMemory = if (currentUserText.isNullOrBlank()) {
+        val relevantMemory = if (currentUserText.isNullOrBlank() || config.relevantMemoryLimit <= 0) {
             emptyList()
         } else {
             memory.relevant(
@@ -131,10 +141,18 @@ data class WorkingContextConfig(
      * is not the same as bounding what the system remembers.
      */
     val recentEventLimit: Int = 6,
-    /** Retrieved older events injected as a compact summary line, not verbatim. */
-    val relevantHistoryLimit: Int = 3,
-    /** Retrieved durable memories injected per turn. */
-    val relevantMemoryLimit: Int = 3,
+    /**
+     * Retrieved older events injected as a compact summary line, not
+     * verbatim. Zero by default — this ran unconditionally on every turn
+     * and was the direct cause of a changing system-message length turn to
+     * turn (measured: 303/545/825 chars in one real session), which defeats
+     * KV-cache prefix reuse. Deep transcript search is the `recall` tool's
+     * job now; raise this only for a host that genuinely wants automatic
+     * always-on recall and accepts the latency/cache cost.
+     */
+    val relevantHistoryLimit: Int = 0,
+    /** Retrieved durable memories injected per turn. Zero by default — same reasoning as [relevantHistoryLimit]; use the `recall` tool for on-demand memory search instead. */
+    val relevantMemoryLimit: Int = 0,
     /** Characters of a retrieved event's content shown in the summary line. */
     val retrievedSnippetChars: Int = 160,
     /**

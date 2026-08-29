@@ -71,21 +71,22 @@ class MemorySystemTest {
     // ── C. Explicit memory round trip ───────────────────────────────────
 
     @Test
-    fun `explicit remember request is stored and later retrieved`() {
+    fun `an explicit candidate is stored and later retrieved`() {
+        // "Explicit" is no longer guessed from phrases in the text — the
+        // caller (a `remember` tool call the model itself chose to make)
+        // states it directly, and passes the fact already extracted from
+        // whatever the user said, not the raw sentence.
         val e = engine("explicit-1")
         val decision = e.memoryWriter.consider(
             MemoryCandidate(
-                content = "Remember that I prefer concise answers.",
+                content = "Prefers concise answers.",
                 scope = MemoryScope.User,
                 provenance = MemoryProvenance.USER,
+                explicit = true,
             ),
         )
-        assertTrue("explicit request should store", decision is MemoryDecision.Stored)
-
-        // The "remember that" preamble is stripped — the memory is the fact.
-        val stored = (decision as MemoryDecision.Stored).memory
-        assertFalse(stored.content.lowercase().startsWith("remember"))
-        assertTrue(stored.content.contains("concise"))
+        assertTrue("explicit candidate should store", decision is MemoryDecision.Stored)
+        assertTrue((decision as MemoryDecision.Stored).memory.content.contains("concise"))
 
         val found = e.memories.relevant("explicit-1", "What response style do I prefer?", limit = 3)
         assertTrue("stored preference should be retrievable", found.any { it.content.contains("concise") })
@@ -233,14 +234,18 @@ class MemorySystemTest {
     fun `repeating the same memory does not create duplicates`() {
         val e = engine("dup-1")
         val candidate = MemoryCandidate(
-            content = "Remember that I prefer concise answers.",
+            content = "Prefers concise answers.",
             scope = MemoryScope.User,
             provenance = MemoryProvenance.USER,
+            explicit = true,
         )
 
         val first = e.memoryWriter.consider(candidate)
         val second = e.memoryWriter.consider(candidate)
-        val third = e.memoryWriter.consider(candidate.copy(content = "remember that i prefer CONCISE answers"))
+        // Dedup is case/punctuation-insensitive at the repository layer
+        // (SqliteMemoryRepository.findDuplicate normalizes before comparing),
+        // independent of anything MemoryWriter itself does to the text.
+        val third = e.memoryWriter.consider(candidate.copy(content = "PREFERS concise answers"))
 
         assertTrue(first is MemoryDecision.Stored)
         assertTrue("an exact repeat is a duplicate", second is MemoryDecision.Duplicate)

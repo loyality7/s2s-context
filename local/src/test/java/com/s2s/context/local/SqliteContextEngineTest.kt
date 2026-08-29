@@ -108,7 +108,11 @@ class SqliteContextEngineTest {
 
     @Test
     fun `relevant older history is retrievable by keyword even after leaving the recent window`() {
-        val config = WorkingContextConfig(recentEventLimit = 2)
+        // relevantHistoryLimit defaults to 0 (see WorkingContextConfig's doc:
+        // this ran on every turn and defeated KV-cache prefix reuse) — a
+        // host that wants automatic recall opts in explicitly, which is what
+        // this test exercises.
+        val config = WorkingContextConfig(recentEventLimit = 2, relevantHistoryLimit = 3)
         val ctx = SqliteContextEngine(ApplicationProvider.getApplicationContext(), "s3", "system", config)
 
         ctx.addUser("I want to talk about kayaking trips")
@@ -175,7 +179,10 @@ class SqliteContextEngineTest {
     @Test
     fun `memory is not injected into every prompt, only when relevant`() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        val ctx = SqliteContextEngine(context, "s7", "system")
+        // Automatic injection opted in explicitly (default is 0 — see
+        // WorkingContextConfig's doc) so this still tests relevance
+        // gating, not just "off means off".
+        val ctx = SqliteContextEngine(context, "s7", "system", WorkingContextConfig(relevantMemoryLimit = 3))
         ctx.memories.create(MemoryScope.Session("s7"), "User's favorite color is teal")
 
         ctx.addUser("what's the weather today?")
@@ -185,6 +192,23 @@ class SqliteContextEngineTest {
         ctx.addUser("what's my favorite color?")
         val related = ctx.messages()
         assertTrue(related.any { it.content.contains("teal") })
+    }
+
+    @Test
+    fun `by default, no memory or history search runs even for a relevant question`() {
+        // The actual regression this refactor exists to fix: a real device
+        // measured the system message changing size on every turn (303,
+        // 545, 825 chars) because relevantMemoryLimit/relevantHistoryLimit
+        // ran unconditionally. Both default to 0 now — deep search is the
+        // `recall` tool's job, not something every prompt pays for.
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val ctx = SqliteContextEngine(context, "s7b", "system")
+        ctx.memories.create(MemoryScope.Session("s7b"), "User's favorite color is teal")
+
+        ctx.addUser("what's my favorite color?")
+        val messages = ctx.messages()
+
+        assertFalse("memory search must not run by default", messages.any { it.content.contains("teal") })
     }
 
     @Test
@@ -264,7 +288,9 @@ class SqliteContextEngineTest {
 
     @Test
     fun `assembled context contains recent history, relevant memory, and current request`() {
-        val config = WorkingContextConfig(recentEventLimit = 2)
+        // Automatic memory injection defaults to off (relevantMemoryLimit=0)
+        // — a host opts in explicitly, which is what this test exercises.
+        val config = WorkingContextConfig(recentEventLimit = 2, relevantMemoryLimit = 3)
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val ctx = SqliteContextEngine(context, "s9", "you are helpful", config)
         ctx.memories.create(MemoryScope.Session("s9"), "User likes concise answers")
